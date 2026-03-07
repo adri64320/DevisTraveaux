@@ -1,0 +1,31 @@
+use_default_settings: true
+
+server:
+  secret_key: "chantier_rentable_searxng_secret"
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json
+  default_lang: "fr-FR"
+
+engines:
+  - name: duckduckgo
+    disabled: true
+  - name: duckduckgo images
+    disabled: true
+  - name: duckduckgo news
+    disabled: true
+  - name: duckduckgo definitions
+    disabled: true
+  - name: google
+    disabled: false
+    weight: 2
+  - name: bing
+    disabled: false
+    weight: 2
+  - name: qwant
+    disabled: false
+    weight: 1

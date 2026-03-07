@@ -1,0 +1,195 @@
+Fonctionnalités détaillées — Chantier Rentable V1
+
+MODULE 1 — Import & Analyse PDF
+F1.1 — Upload PDF
+
+Endpoint POST /api/devis/upload
+Validation : type MIME application/pdf, taille max 10MB
+Stockage temporaire du fichier (pas besoin de persister en V1)
+
+F1.2 — Extraction texte PDF
+
+Utiliser pdfplumber pour extraire le texte brut + tableaux
+Gérer les cas : PDF scanné (image) → retourner une erreur claire, PDF texte → extraction normale
+Nettoyer le texte extrait (supprimer headers/footers répétitifs)
+
+F1.3 — Extraction structurée via IA (Groq)
+
+Envoyer le texte extrait à llama-3.3-70b via Groq API
+System prompt strict avec output JSON forcé :
+
+json[{
+  "designation": "Câble RVK 1x16mm²",
+  "quantite": 10,
+  "unite": "ml",
+  "prix_unitaire_facture": 4.50,
+  "total_facture": 45.00
+}]
+
+Gérer les cas où l'IA hallucine ou retourne un JSON malformé (retry + validation Pydantic)
+
+F1.4 — Classification des lignes
+
+Fait dans le même appel Groq que F1.3 (pas d'appel séparé)
+Ajouter le champ type: "MATERIEL" | "MAIN_OEUVRE" | "MIXTE" dans le JSON
+Règles injectées dans le system prompt :
+
+"pose", "installation", "forfait MO", "main d'œuvre" → MAIN_OEUVRE
+"fourniture + pose", "pack", "forfait complet", "tout compris" → MIXTE
+Produit physique identifiable → MATERIEL
+Doute → MIXTE
+
+
+L'utilisateur peut corriger la classification via un dropdown sur chaque ligne
+
+
+MODULE 2 — Informations chantier & Main d'œuvre
+F2.1 — Formulaire métier
+
+Liste déroulante : Électricien, Plombier, Maçon, Menuisier, Peintre, Couvreur, Carreleur, Multi-corps d'état, Autre
+Ce champ influence les suggestions de coefficient de charges plus tard
+
+F2.2 — Saisie du dirigeant
+
+Unité de temps : toggle Heures / Jours
+Temps estimé : input numérique
+Taux horaire du dirigeant : input €/h
+
+F2.3 — Saisie des salariés
+
+Ajouter / supprimer dynamiquement des lignes salariés
+Par salarié : Rôle (Chef de chantier / Ouvrier / Apprenti), Taux horaire (€/h), Temps prévu
+Calcul affiché en temps réel par ligne : taux × temps
+
+F2.4 — Calcul total main d'œuvre
+
+Coefficient charges patronales : par défaut 1.45 (BTP), modifiable par l'utilisateur
+Formule : Coût MO = (Σ taux_i × temps_i + taux_dirigeant × temps_dirigeant) × coefficient
+Afficher le détail : coût brut + charges = total MO
+
+
+MODULE 3 — Estimation prix marché
+F3.1 — Normalisation du produit
+
+Pour chaque ligne MATERIEL, envoyer la désignation à Groq
+Prompt : "Normalise ce nom de produit pour une recherche Google Shopping française, en 3-6 mots clés pertinents"
+Ex: "Câble RVK cuivre 1x16mm² noir 10m" → "câble RVK 16mm2 cuivre prix"
+
+F3.2 — Recherche web
+
+Utiliser duckduckgo-search : ddgs.text("câble RVK 16mm2 prix", max_results=5)
+Récupérer 3 à 5 URLs de résultats
+Filtrer les URLs inutiles (PDF, forums sans prix, Wikipedia)
+
+F3.3 — Extraction prix via Jina + Groq
+
+Pour chaque URL : GET https://r.jina.ai/{url} → texte markdown propre
+Envoyer ce texte à Groq : "Extrais uniquement le prix unitaire en euros de [produit] depuis ce texte. Réponds uniquement avec un nombre ou null"
+Collecter tous les prix valides (ignorer les null)
+
+F3.4 — Calcul statistique
+
+Minimum 2 prix valides requis pour estimer
+Calculer : médiane, P25, P75, écart-type
+Niveau de confiance :
+
+Fort : ≥ 3 sources, écart-type < 20% de la médiane
+Moyen : 2 sources OU écart-type entre 20-40%
+Faible : 1 source OU écart-type > 40%
+
+
+Si 0 prix trouvé → champ vide, l'utilisateur saisit manuellement
+
+F3.5 — Cache PostgreSQL
+
+Table prix_cache(produit_normalise, prix_median, p25, p75, confiance, sources, created_at)
+TTL : 48h (vérifier created_at avant de relancer une recherche)
+Ça évite de re-scraper le même produit 50 fois
+
+F3.6 — Affichage & édition
+
+Par ligne MATERIEL : prix estimé (médiane) + fourchette + badge confiance + 2-3 liens sources
+Champ prix éditable par l'utilisateur (sa valeur override l'estimation)
+Par ligne MAIN_OEUVRE : coût matière = 0, affiché en grisé
+Par ligne MIXTE : estimation proposée + validation obligatoire avant de continuer (checkbox ou bouton confirmer)
+
+
+MODULE 4 — Résultats & simulation
+F4.1 — 4 indicateurs principaux
+
+CA = somme de tous les total_facture
+Coût matériaux = somme des quantite × prix_unitaire_estime pour les MATERIEL + part matière des MIXTE validés
+Coût MO = résultat de F2.4
+Coût total = coût matériaux + coût MO
+Gain estimé = CA − coût total
+Gain par heure/jour = gain estimé ÷ temps total
+
+F4.2 — Badge rentabilité
+
+Gain < 0 → badge rouge "À risque"
+Gain entre 0 et 15% du CA → badge orange "Attention"
+Gain ≥ 15% du CA → badge vert "Rentable"
+
+F4.3 — Slider simulation durée
+
+Slider 1 → 60 (heures ou jours selon l'unité choisie)
+Recalcul dynamique côté frontend (pas d'appel API) : gain_par_unite = gain_estimé / valeur_slider
+Afficher l'évolution du gain en temps réel
+
+
+MODULE 5 — Auth & comptes
+F5.1 — Création de compte
+
+Email + mot de passe via PostgreSQL + bcrypt pour le hash
+Ou OAuth Google (plus tard)
+JWT stocké en cookie httpOnly
+
+F5.2 — Déclencheur export
+
+Sans compte : bouton export grisé avec tooltip "Créez un compte gratuit pour exporter"
+Modale de création de compte au clic
+Après création : export débloqué immédiatement
+
+F5.3 — Profils salariés sauvegardés
+
+Table salaries(user_id, nom, role, taux_horaire)
+Après connexion : préremplissage automatique du formulaire F2.3
+CRUD simple : ajouter, modifier, supprimer un profil
+
+
+MODULE 6 — Export Excel
+F6.1 — Génération via openpyxl
+
+Endpoint POST /api/export/excel (protégé, JWT requis)
+Feuille 1 — Résumé chantier : CA, coût total, gain, gain/jour, badge rentabilité, date, métier
+Feuille 2 — Main d'œuvre : tableau des salariés + dirigeant, taux, temps, coût, total charges
+Feuille 3 — Lignes devis : toutes les lignes avec désignation, quantité, unité, prix facturé, prix estimé, écart, type, niveau de confiance
+Mise en forme : headers colorés, colonnes auto-width, totaux en gras
+
+
+MODULE 7 — Historique & synthèses (post-auth)
+F7.1 — Sauvegarde automatique
+
+À chaque calcul complété par un user connecté : sauvegarder en BDD
+Table chantiers(user_id, nom, date, ca, cout_total, gain, données_json)
+
+F7.2 — Synthèses
+
+Vue hebdomadaire / mensuelle / annuelle
+Indicateurs agrégés : CA total, gain total, marge moyenne, nombre de chantiers
+Graphique simple (bar chart) — librairie frontend type Recharts
+
+
+Schéma BDD PostgreSQL
+sqlusers (id, email, password_hash, created_at)
+salaries (id, user_id, nom, role, taux_horaire)
+chantiers (id, user_id, nom, metier, date, ca, cout_mo, cout_materiaux, gain, donnees_json, created_at)
+prix_cache (id, produit_normalise, prix_median, p25, p75, confiance, sources_json, created_at)
+
+Ce qui n'est PAS dans la V1
+
+Facturation (prévoir juste la table et les routes, mais pas l'UI)
+OAuth Google
+PDF scanné (OCR)
+Application mobile
+Notifications email
